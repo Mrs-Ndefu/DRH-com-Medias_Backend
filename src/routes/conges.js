@@ -1,0 +1,145 @@
+const router = require('express').Router();
+const pool   = require('../db');
+const auth   = require('../middleware/auth');
+
+const CONGES_ROLES = ['ADMIN', 'DRH', 'RH', 'CHEF'];
+function requireAccess(req, res, next) {
+  if (!CONGES_ROLES.includes(req.user?.role)) {
+    return res.status(403).json({ message: 'Accès refusé.' });
+  }
+  next();
+}
+router.use(auth, requireAccess);
+
+// GET /api/conges
+router.get('/', async (req, res, next) => {
+  try {
+    const { agent_id, status, type } = req.query;
+    const params = [];
+    const conditions = [];
+
+    if (agent_id) { params.push(parseInt(agent_id)); conditions.push(`c.agent_id=$${params.length}`); }
+    if (status)   { params.push(status);              conditions.push(`c.status=$${params.length}`); }
+    if (type)     { params.push(type);                conditions.push(`c.type=$${params.length}`); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const { rows } = await pool.query(`
+      SELECT c.*,
+             a.nom_famille, a.prenom AS agent_prenom, a.matricule, a.poste,
+             a.nom_famille AS agent_nom,
+             d.libelle AS direction_libelle
+      FROM conges c
+      JOIN agents a ON a.id = c.agent_id
+      LEFT JOIN directions d ON d.id = a.direction_id
+      ${where}
+      ORDER BY c.created_at DESC
+    `, params);
+    res.json({ data: rows, total: rows.length });
+  } catch (err) { next(err); }
+});
+
+// GET /api/conges/:id
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.*, a.nom_famille, a.prenom, a.matricule, a.poste, d.libelle AS direction_libelle
+      FROM conges c
+      JOIN agents a ON a.id = c.agent_id
+      LEFT JOIN directions d ON d.id = a.direction_id
+      WHERE c.id = $1
+    `, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: 'Congé introuvable.' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// POST /api/conges
+router.post('/', async (req, res, next) => {
+  try {
+    const { agent_id, type, date_debut, date_fin, nb_jours, motif } = req.body;
+    const { rows } = await pool.query(`
+      INSERT INTO conges (agent_id, type, date_debut, date_fin, nb_jours, motif)
+      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+    `, [agent_id, type, date_debut, date_fin, nb_jours, motif || null]);
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/conges/:id/valider-chef
+router.patch('/:id/valider-chef', async (req, res, next) => {
+  try {
+    const { par, commentaire, approuve } = req.body;
+    if (approuve) {
+      const { rows } = await pool.query(`
+        UPDATE conges SET
+          status='PENDING_DRH',
+          validation_chef_date=CURRENT_DATE,
+          validation_chef_par=$1,
+          validation_chef_com=$2,
+          updated_at=NOW()
+        WHERE id=$3 AND status='PENDING_CHEF' RETURNING *
+      `, [par, commentaire || null, req.params.id]);
+      if (!rows.length) return res.status(400).json({ message: 'Action impossible sur ce congé.' });
+      res.json(rows[0]);
+    } else {
+      const { rows } = await pool.query(`
+        UPDATE conges SET
+          status='REJECTED',
+          rejet_date=CURRENT_DATE,
+          rejet_par=$1,
+          rejet_motif=$2,
+          updated_at=NOW()
+        WHERE id=$3 AND status='PENDING_CHEF' RETURNING *
+      `, [par, commentaire || null, req.params.id]);
+      if (!rows.length) return res.status(400).json({ message: 'Action impossible sur ce congé.' });
+      res.json(rows[0]);
+    }
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/conges/:id/valider-drh
+router.patch('/:id/valider-drh', async (req, res, next) => {
+  try {
+    const { par, commentaire, approuve } = req.body;
+    if (approuve) {
+      const { rows } = await pool.query(`
+        UPDATE conges SET
+          status='APPROVED',
+          validation_drh_date=CURRENT_DATE,
+          validation_drh_par=$1,
+          validation_drh_com=$2,
+          updated_at=NOW()
+        WHERE id=$3 AND status='PENDING_DRH' RETURNING *
+      `, [par, commentaire || null, req.params.id]);
+      if (!rows.length) return res.status(400).json({ message: 'Action impossible sur ce congé.' });
+      res.json(rows[0]);
+    } else {
+      const { rows } = await pool.query(`
+        UPDATE conges SET
+          status='REJECTED',
+          rejet_date=CURRENT_DATE,
+          rejet_par=$1,
+          rejet_motif=$2,
+          updated_at=NOW()
+        WHERE id=$3 AND status='PENDING_DRH' RETURNING *
+      `, [par, commentaire || null, req.params.id]);
+      if (!rows.length) return res.status(400).json({ message: 'Action impossible sur ce congé.' });
+      res.json(rows[0]);
+    }
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/conges/:id
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      "DELETE FROM conges WHERE id=$1 AND status='PENDING_CHEF'",
+      [req.params.id]
+    );
+    if (!rowCount) return res.status(400).json({ message: 'Suppression impossible.' });
+    res.json({ message: 'Demande annulée.' });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
