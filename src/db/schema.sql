@@ -1,6 +1,6 @@
 -- ============================================================
 -- SIRH — Schéma PostgreSQL
--- Ministère de la Fonction Publique
+-- Ministère de la Communication et des Médias
 -- ============================================================
 
 -- Extensions

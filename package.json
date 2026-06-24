@@ -1,7 +1,7 @@
 {
   "name": "sirh-backend",
   "version": "1.0.0",
-  "description": "Backend API pour le SIRH - Ministère de la Fonction Publique",
+  "description": "Backend API pour le SIRH - Ministère de la Communication et des Médias",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
