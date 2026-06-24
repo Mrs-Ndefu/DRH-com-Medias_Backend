@@ -1,9 +1,38 @@
-const router  = require('express').Router();
-const bcrypt  = require('bcryptjs');
-const jwt     = require('jsonwebtoken');
+const router   = require('express').Router();
+const bcrypt   = require('bcryptjs');
+const crypto   = require('crypto');
+const path     = require('path');
+const jwt      = require('jsonwebtoken');
+const multer   = require('multer');
 const { body, validationResult } = require('express-validator');
-const pool    = require('../db');
-const auth    = require('../middleware/auth');
+const pool     = require('../db');
+const auth     = require('../middleware/auth');
+const { sendWelcomeEmail } = require('../utils/mailer');
+
+// Multer pour photo de profil (self)
+const photoStorage = multer.diskStorage({
+  destination: path.join(__dirname, '../../uploads/users'),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `user-${req.user.id}-${Date.now()}${ext}`);
+  },
+});
+const uploadPhoto = multer({
+  storage: photoStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Seules les images sont acceptées (JPEG, PNG, WEBP).'));
+  },
+});
+
+function generatePassword() {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let pwd = '';
+  const bytes = crypto.randomBytes(10);
+  for (let i = 0; i < 8; i++) pwd += chars[bytes[i] % chars.length];
+  return pwd + '!';
+}
 
 // POST /api/auth/login
 router.post('/login', [
@@ -32,7 +61,7 @@ router.post('/login', [
 
     res.json({
       token,
-      user: { id: user.id, nom: user.nom, prenom: user.prenom, email: user.email, role: user.role },
+      user: { id: user.id, nom: user.nom, prenom: user.prenom, email: user.email, role: user.role, photo: user.photo },
     });
   } catch (err) { next(err); }
 });
@@ -41,40 +70,65 @@ router.post('/login', [
 router.get('/me', auth, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, nom, prenom, email, role FROM users WHERE id = $1',
+      'SELECT id, nom, prenom, email, role, photo FROM users WHERE id = $1',
       [req.user.id]
     );
     res.json(rows[0]);
   } catch (err) { next(err); }
 });
 
-// POST /api/auth/register
-router.post('/register', [
-  body('email').isEmail().withMessage('Email invalide'),
-  body('password').isLength({ min: 6 }).withMessage('Minimum 6 caractères'),
-  body('prenom').notEmpty().withMessage('Prénom requis'),
-  body('nom').notEmpty().withMessage('Nom requis'),
-], async (req, res, next) => {
+// POST /api/auth/register — ADMIN uniquement, mot de passe auto-généré
+router.post('/register', auth, async (req, res, next) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ message: errors.array()[0].msg });
+    if (req.user?.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Seul un administrateur peut créer des comptes.' });
+    }
 
-    const { prenom, nom, email, password, role } = req.body;
+    const { prenom, nom, email, role } = req.body;
+    if (!prenom || !nom || !email) {
+      return res.status(400).json({ message: 'Prénom, nom et email sont requis.' });
+    }
+
     const { rows: exist } = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
     if (exist.length) return res.status(409).json({ message: 'Cet email est déjà utilisé.' });
 
     const ROLES = ['RH', 'CHEF', 'DRH', 'ADMIN', 'SUPER_USER', 'SG'];
     const userRole = ROLES.includes(role) ? role : 'RH';
-    const hash = await bcrypt.hash(password, 10);
+
+    const motDePasse = generatePassword();
+    const hash = await bcrypt.hash(motDePasse, 10);
+
     const { rows } = await pool.query(
       'INSERT INTO users (prenom, nom, email, password_hash, role) VALUES ($1,$2,$3,$4,$5) RETURNING id, prenom, nom, email, role',
       [prenom, nom, email, hash, userRole]
     );
-    res.status(201).json({ message: 'Compte créé avec succès.', user: rows[0] });
+    const newUser = rows[0];
+
+    // Envoi email (async, non bloquant)
+    const emailEnvoye = await sendWelcomeEmail(email, prenom, nom, motDePasse).catch(() => false);
+
+    // Notification admins
+    const { createNotification } = require('./notifications');
+    const { rows: creatRows } = await pool.query('SELECT prenom, nom, email FROM users WHERE id=$1', [req.user.id]);
+    const cr = creatRows[0] || {};
+    const createur = `${cr.prenom || ''} ${cr.nom || ''}`.trim() || cr.email || `User #${req.user.id}`;
+    await createNotification(
+      'UTILISATEUR',
+      'Nouvel utilisateur créé',
+      `${createur} a créé un compte pour ${prenom} ${nom} (${email}) avec le rôle ${userRole}.`,
+      'ADMIN'
+    ).catch(() => {});
+
+    res.status(201).json({
+      message: 'Compte créé avec succès.',
+      user: newUser,
+      motDePasse,       // retourné pour l'afficher dans l'UI si email non envoyé
+      emailEnvoye,
+    });
   } catch (err) { next(err); }
 });
 
-// POST /api/auth/change-password
+// PATCH /api/auth/change-password — changer son propre mot de passe
 router.post('/change-password', auth, [
   body('currentPassword').notEmpty(),
   body('newPassword').isLength({ min: 6 }).withMessage('Minimum 6 caractères'),
@@ -89,7 +143,20 @@ router.post('/change-password', auth, [
 
     const newHash = await bcrypt.hash(req.body.newPassword, 10);
     await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [newHash, req.user.id]);
-    res.json({ message: 'Mot de passe modifié.' });
+    res.json({ message: 'Mot de passe modifié avec succès.' });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/auth/me/photo — changer sa propre photo de profil
+router.patch('/me/photo', auth, uploadPhoto.single('photo'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu.' });
+    const filePath = `/uploads/users/${req.file.filename}`;
+    const { rows } = await pool.query(
+      'UPDATE users SET photo=$1, updated_at=NOW() WHERE id=$2 RETURNING id, prenom, nom, email, role, photo',
+      [filePath, req.user.id]
+    );
+    res.json(rows[0]);
   } catch (err) { next(err); }
 });
 

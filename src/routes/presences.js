@@ -39,6 +39,77 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Règles horaires ──────────────────────────────────────────────────
+const ENTREE_MIN    = '06:00'; // heure d'ouverture
+const ENTREE_LIMITE = '09:45'; // après → RETARD
+const SORTIE_MIN    = '15:45'; // avant → sortie anticipée
+
+function heureToMin(h) {
+  const [hh, mm] = h.split(':').map(Number);
+  return hh * 60 + mm;
+}
+
+// POST /api/presences/pointer  (scan biométrique ou manuel)
+router.post('/pointer', async (req, res, next) => {
+  try {
+    const { agent_id, type } = req.body; // type: 'IN' | 'OUT'
+    if (!agent_id || !type) return res.status(400).json({ message: 'agent_id et type requis.' });
+
+    const now = new Date();
+    const datePresence = now.toISOString().split('T')[0];
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const heureActuelle = `${hh}:${mm}:${ss}`;
+    const heureHHMM     = `${hh}:${mm}`;
+
+    const agentRes = await pool.query(
+      'SELECT nom_famille, prenom, matricule, poste FROM agents WHERE id=$1',
+      [agent_id]
+    );
+    if (!agentRes.rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
+    const agent = agentRes.rows[0];
+
+    if (type === 'IN') {
+      const enRetard = heureToMin(heureHHMM) > heureToMin(ENTREE_LIMITE);
+      const trop_tot = heureToMin(heureHHMM) < heureToMin(ENTREE_MIN);
+      if (trop_tot) {
+        return res.status(400).json({ message: `Pointage refusé : heure d'ouverture à ${ENTREE_MIN}.` });
+      }
+      const statut = enRetard ? 'RETARD' : 'PRESENT';
+      const obs    = enRetard ? `Arrivée tardive à ${heureHHMM} (limite ${ENTREE_LIMITE})` : null;
+
+      const { rows } = await pool.query(`
+        INSERT INTO presences (agent_id, date_presence, heure_entree, mode_pointage, statut, observation)
+        VALUES ($1,$2,$3,'BIOMETRIQUE',$4,$5)
+        ON CONFLICT (agent_id, date_presence)
+        DO UPDATE SET heure_entree=$3, statut=$4, observation=$5, mode_pointage='BIOMETRIQUE'
+        RETURNING *
+      `, [agent_id, datePresence, heureActuelle, statut, obs]);
+
+      return res.json({ ...rows[0], ...agent, retard: enRetard, sortie_anticipee: false });
+    }
+
+    if (type === 'OUT') {
+      const avantLimite = heureToMin(heureHHMM) < heureToMin(SORTIE_MIN);
+      const obs = avantLimite ? `Sortie anticipée à ${heureHHMM} (minimum ${SORTIE_MIN})` : null;
+
+      const { rows } = await pool.query(`
+        UPDATE presences SET heure_sortie=$1, observation=COALESCE($2, observation), mode_pointage='BIOMETRIQUE'
+        WHERE agent_id=$3 AND date_presence=$4
+        RETURNING *
+      `, [heureActuelle, obs, agent_id, datePresence]);
+
+      if (!rows.length) {
+        return res.status(404).json({ message: "Aucune entrée enregistrée aujourd'hui pour cet agent." });
+      }
+      return res.json({ ...rows[0], ...agent, retard: false, sortie_anticipee: avantLimite });
+    }
+
+    res.status(400).json({ message: 'type doit être IN ou OUT.' });
+  } catch (err) { next(err); }
+});
+
 // POST /api/presences  (pointage manuel ou import)
 router.post('/', async (req, res, next) => {
   try {

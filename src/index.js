@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express      = require('express');
 const cors         = require('cors');
+const path         = require('path');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
@@ -13,6 +14,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Routes
 app.use('/api/auth',         require('./routes/auth'));
@@ -24,7 +26,8 @@ app.use('/api/payroll',      require('./routes/payroll'));
 app.use('/api/recruitment',  require('./routes/recruitment'));
 app.use('/api/dashboard',    require('./routes/dashboard'));
 app.use('/api/users',        require('./routes/users'));
-app.use('/api/archives',     require('./routes/archives'));
+app.use('/api/archives',       require('./routes/archives'));
+app.use('/api/notifications',  require('./routes/notifications').router);
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 

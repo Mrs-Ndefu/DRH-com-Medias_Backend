@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const pool   = require('../db');
 const auth   = require('../middleware/auth');
+const { createNotification } = require('./notifications');
 
 const CONGES_ROLES = ['ADMIN', 'DRH', 'RH', 'CHEF'];
 function requireAccess(req, res, next) {
@@ -57,11 +58,24 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/conges
 router.post('/', async (req, res, next) => {
   try {
-    const { agent_id, type, date_debut, date_fin, nb_jours, motif } = req.body;
+    const { agent_id, date_debut, date_fin, nb_jours, motif } = req.body;
+    const type = (req.body.type || '').toUpperCase();
     const { rows } = await pool.query(`
       INSERT INTO conges (agent_id, type, date_debut, date_fin, nb_jours, motif)
       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
     `, [agent_id, type, date_debut, date_fin, nb_jours, motif || null]);
+
+    // Récupérer le nom de l'agent pour la notification
+    const agentRes = await pool.query('SELECT nom_famille, prenom FROM agents WHERE id=$1', [agent_id]);
+    const agent = agentRes.rows[0];
+    const agentNom = agent ? `${agent.prenom} ${agent.nom_famille}` : `Agent #${agent_id}`;
+    await createNotification(
+      'CONGE',
+      `Nouvelle demande de congé`,
+      `${agentNom} a soumis une demande de congé ${type} du ${new Date(date_debut).toLocaleDateString('fr-FR')} au ${new Date(date_fin).toLocaleDateString('fr-FR')} (${nb_jours} jour(s)).`,
+      'ADMIN,DRH,CHEF'
+    ).catch(() => {});
+
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 });

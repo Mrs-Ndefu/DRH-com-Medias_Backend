@@ -1,5 +1,7 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
+const path   = require('path');
+const multer = require('multer');
 const { body, validationResult } = require('express-validator');
 const pool   = require('../db');
 const auth   = require('../middleware/auth');
@@ -13,13 +15,44 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// GET /api/users — liste tous les utilisateurs (ADMIN / DRH)
+// Multer pour photos utilisateurs
+const storage = multer.diskStorage({
+  destination: path.join(__dirname, '../../uploads/users'),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `user-${req.params.id}-${Date.now()}${ext}`);
+  },
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Seules les images sont acceptées (JPEG, PNG, WEBP).'));
+  },
+});
+
+// GET /api/users — liste tous les utilisateurs (ADMIN)
 router.get('/', auth, requireAdmin, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, prenom, nom, email, role, actif, created_at FROM users ORDER BY nom, prenom'
+      'SELECT id, prenom, nom, email, role, actif, photo, created_at FROM users ORDER BY nom, prenom'
     );
     res.json({ data: rows, total: rows.length });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/users/:id/photo — upload photo de profil
+router.patch('/:id/photo', auth, requireAdmin, upload.single('photo'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu.' });
+    const filePath = `/uploads/users/${req.file.filename}`;
+    const { rows } = await pool.query(
+      'UPDATE users SET photo=$1, updated_at=NOW() WHERE id=$2 RETURNING id, photo',
+      [filePath, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Utilisateur introuvable.' });
+    res.json(rows[0]);
   } catch (err) { next(err); }
 });
 
