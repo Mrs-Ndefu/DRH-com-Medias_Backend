@@ -1,5 +1,8 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+// Retourner les colonnes DATE comme chaînes 'YYYY-MM-DD' (évite la conversion UTC)
+types.setTypeParser(1082, (val) => val);
 
 const pool = new Pool({
   host:     process.env.DB_HOST     || 'localhost',

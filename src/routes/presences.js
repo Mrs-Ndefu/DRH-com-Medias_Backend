@@ -181,6 +181,390 @@ router.get('/rapport', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Rapport trimestriel par agent ────────────────────────────────────────────
+const TRIMESTRES = {
+  1: { moisDebut: 1, moisFin: 3, label: '1er trimestre (Jan–Mar)' },
+  2: { moisDebut: 4, moisFin: 6, label: '2e trimestre (Avr–Jun)'  },
+  3: { moisDebut: 7, moisFin: 9, label: '3e trimestre (Jul–Sep)'  },
+  4: { moisDebut:10, moisFin:12, label: '4e trimestre (Oct–Déc)'  },
+};
+const JOURS_FR = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+const MOIS_FR  = ['','Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+
+// Formate en YYYY-MM-DD sans conversion UTC
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const j = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${j}`;
+}
+
+function buildTrimestre(agentId, trimestre, annee) {
+  const t = TRIMESTRES[trimestre];
+  const dateDebut = new Date(annee, t.moisDebut - 1, 1);
+  const dateFin   = new Date(annee, t.moisFin, 0);
+  return { t, dateDebut, dateFin };
+}
+
+// GET /api/presences/rapport-trimestriel?agent_id=&trimestre=&annee=
+router.get('/rapport-trimestriel', async (req, res, next) => {
+  try {
+    const { agent_id, trimestre = 1, annee } = req.query;
+    const yr = parseInt(annee || new Date().getFullYear());
+    const tr = parseInt(trimestre);
+
+    if (!agent_id) return res.status(400).json({ message: 'agent_id requis.' });
+    if (!TRIMESTRES[tr]) return res.status(400).json({ message: 'Trimestre invalide (1–4).' });
+
+    const agentRes = await pool.query(`
+      SELECT a.id, a.nom_famille, a.prenom, a.matricule, a.poste,
+             d.libelle AS direction_libelle
+      FROM agents a LEFT JOIN directions d ON d.id=a.direction_id
+      WHERE a.id=$1
+    `, [agent_id]);
+    if (!agentRes.rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
+    const agent = agentRes.rows[0];
+
+    const { dateDebut, dateFin } = buildTrimestre(agent_id, tr, yr);
+    const debutStr = localDateStr(dateDebut);
+    const finStr   = localDateStr(dateFin);
+
+    const presRes = await pool.query(`
+      SELECT * FROM presences
+      WHERE agent_id=$1 AND date_presence BETWEEN $2 AND $3
+      ORDER BY date_presence
+    `, [agent_id, debutStr, finStr]);
+
+    const presMap = {};
+    presRes.rows.forEach(p => {
+      const k = String(p.date_presence).split('T')[0];
+      presMap[k] = p;
+    });
+
+    const jours = [];
+    const cur = new Date(dateDebut);
+    while (cur <= dateFin) {
+      const ds = localDateStr(cur);
+      const dow = cur.getDay();
+      jours.push({
+        date:       ds,
+        jour:       JOURS_FR[dow],
+        mois:       MOIS_FR[cur.getMonth() + 1],
+        is_weekend: dow === 0 || dow === 6,
+        presence:   presMap[ds] || null,
+      });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    const ouvres        = jours.filter(j => !j.is_weekend);
+    const nbPresents    = ouvres.filter(j => j.presence?.statut === 'PRESENT').length;
+    const nbRetards     = ouvres.filter(j => j.presence?.statut === 'RETARD').length;
+    const nbAbsents     = ouvres.filter(j => j.presence?.statut === 'ABSENT').length;
+    const nbConges      = ouvres.filter(j => j.presence?.statut === 'CONGE').length;
+    const nbSans        = ouvres.filter(j => !j.presence).length;
+    const tauxPresence  = ouvres.length
+      ? +((nbPresents + nbRetards) / ouvres.length * 100).toFixed(1)
+      : 0;
+
+    res.json({
+      agent,
+      trimestre:  tr,
+      annee:      yr,
+      label:      TRIMESTRES[tr].label,
+      periode:    { debut: debutStr, fin: finStr },
+      jours,
+      stats: {
+        nb_jours_ouvres:  ouvres.length,
+        nb_presents:      nbPresents,
+        nb_retards:       nbRetards,
+        nb_absents:       nbAbsents,
+        nb_conges:        nbConges,
+        nb_sans_pointage: nbSans,
+        taux_presence:    tauxPresence,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/presences/export/excel-trimestriel?agent_id=&trimestre=&annee=
+router.get('/export/excel-trimestriel', async (req, res, next) => {
+  try {
+    const { agent_id, trimestre = 1, annee } = req.query;
+    const yr = parseInt(annee || new Date().getFullYear());
+    const tr = parseInt(trimestre);
+    if (!agent_id || !TRIMESTRES[tr]) return res.status(400).json({ message: 'Paramètres invalides.' });
+
+    const agentRes = await pool.query(`
+      SELECT a.*, d.libelle AS direction_libelle FROM agents a
+      LEFT JOIN directions d ON d.id=a.direction_id WHERE a.id=$1
+    `, [agent_id]);
+    const agent = agentRes.rows[0];
+    if (!agent) return res.status(404).json({ message: 'Agent introuvable.' });
+
+    const { dateDebut, dateFin } = buildTrimestre(agent_id, tr, yr);
+    const presRes = await pool.query(`
+      SELECT * FROM presences WHERE agent_id=$1 AND date_presence BETWEEN $2 AND $3
+      ORDER BY date_presence
+    `, [agent_id, localDateStr(dateDebut), localDateStr(dateFin)]);
+
+    const presMap = {};
+    presRes.rows.forEach(p => {
+      const k = String(p.date_presence).split('T')[0];
+      presMap[k] = p;
+    });
+
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'SIRH MCM';
+
+    // Créer une feuille par mois
+    const { moisDebut, moisFin } = TRIMESTRES[tr];
+    for (let m = moisDebut; m <= moisFin; m++) {
+      const ws = wb.addWorksheet(MOIS_FR[m]);
+
+      // Titre
+      ws.mergeCells('A1:H1');
+      ws.getCell('A1').value = `MINISTÈRE DE LA COMMUNICATION ET DES MÉDIAS`;
+      ws.getCell('A1').font  = { bold: true, size: 12, color: { argb: 'FF1565C0' } };
+      ws.getCell('A1').alignment = { horizontal: 'center' };
+
+      ws.mergeCells('A2:H2');
+      ws.getCell('A2').value = `Rapport trimestriel — ${TRIMESTRES[tr].label} ${yr}`;
+      ws.getCell('A2').font  = { italic: true, size: 10 };
+      ws.getCell('A2').alignment = { horizontal: 'center' };
+
+      ws.mergeCells('A3:H3');
+      ws.getCell('A3').value = `Agent : ${agent.prenom} ${agent.nom_famille} — Matricule : ${agent.matricule}`;
+      ws.getCell('A3').font  = { bold: true, size: 10 };
+      ws.getCell('A3').alignment = { horizontal: 'center' };
+
+      ws.addRow([]);
+      const hr = ws.addRow(['Date', 'Jour', 'Entrée', 'Sortie', 'Durée', 'Statut', 'Observation']);
+      hr.eachCell(c => {
+        c.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+        c.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1565C0' } };
+        c.alignment = { horizontal: 'center', vertical: 'middle' };
+      });
+
+      const firstDay = new Date(yr, m - 1, 1);
+      const lastDay  = new Date(yr, m, 0);
+      let nbP = 0, nbR = 0, nbA = 0, nbC = 0;
+
+      const cur = new Date(firstDay);
+      while (cur <= lastDay) {
+        const ds  = localDateStr(cur);
+        const dow = cur.getDay();
+        const isWE = dow === 0 || dow === 6;
+        const p = presMap[ds];
+
+        const row = ws.addRow([
+          new Date(ds + 'T12:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: 'long' }),
+          JOURS_FR[dow],
+          p?.heure_entree ? p.heure_entree.substring(0,5) : (isWE ? '' : '—'),
+          p?.heure_sortie ? p.heure_sortie.substring(0,5) : (isWE ? '' : '—'),
+          calcDuree(p?.heure_entree, p?.heure_sortie),
+          isWE ? 'Week-end' : (p?.statut || 'Non pointé'),
+          p?.observation || '',
+        ]);
+
+        let bgColor = 'FFFFFFFF';
+        if (isWE)              bgColor = 'FFE0E0E0';
+        else if (p?.statut === 'RETARD')  { bgColor = 'FFFFF9C4'; nbR++; }
+        else if (p?.statut === 'PRESENT') { bgColor = 'FFF1F8E9'; nbP++; }
+        else if (p?.statut === 'ABSENT')  { bgColor = 'FFFFEBEE'; nbA++; }
+        else if (p?.statut === 'CONGE')   { bgColor = 'FFE3F2FD'; nbC++; }
+
+        row.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } }; c.font = { size: 9 }; });
+        cur.setDate(cur.getDate() + 1);
+      }
+
+      // Récap
+      ws.addRow([]);
+      ws.addRow([`Présents: ${nbP}  |  Retards: ${nbR}  |  Absents: ${nbA}  |  Congés: ${nbC}`]);
+
+      ws.columns = [{ width: 18 },{ width: 12 },{ width: 10 },{ width: 10 },{ width: 8 },{ width: 14 },{ width: 45 }];
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="rapport_T${tr}_${yr}_${agent.matricule}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) { next(err); }
+});
+
+// GET /api/presences/export/pdf-trimestriel?agent_id=&trimestre=&annee=
+router.get('/export/pdf-trimestriel', async (req, res, next) => {
+  try {
+    const { agent_id, trimestre = 1, annee } = req.query;
+    const yr = parseInt(annee || new Date().getFullYear());
+    const tr = parseInt(trimestre);
+    if (!agent_id || !TRIMESTRES[tr]) return res.status(400).json({ message: 'Paramètres invalides.' });
+
+    const agentRes = await pool.query(`
+      SELECT a.*, d.libelle AS direction_libelle FROM agents a
+      LEFT JOIN directions d ON d.id=a.direction_id WHERE a.id=$1
+    `, [agent_id]);
+    const agent = agentRes.rows[0];
+    if (!agent) return res.status(404).json({ message: 'Agent introuvable.' });
+
+    const { dateDebut, dateFin } = buildTrimestre(agent_id, tr, yr);
+    const presRes = await pool.query(`
+      SELECT * FROM presences WHERE agent_id=$1 AND date_presence BETWEEN $2 AND $3
+      ORDER BY date_presence
+    `, [agent_id, localDateStr(dateDebut), localDateStr(dateFin)]);
+
+    const presMap = {};
+    presRes.rows.forEach(p => { const k = String(p.date_presence).split('T')[0]; presMap[k] = p; });
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 35 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="rapport_T${tr}_${yr}_${agent.matricule}.pdf"`);
+    doc.pipe(res);
+
+    const W = doc.page.width - 70;
+    const L = 35;
+
+    const drawPageHeader = () => {
+      doc.rect(L, 30, W, 55).fill('#1565C0').fillColor('white');
+      doc.fontSize(12).font('Helvetica-Bold')
+         .text('MINISTÈRE DE LA COMMUNICATION ET DES MÉDIAS', L+8, 37, { width: W-16, align: 'center' });
+      doc.fontSize(10).font('Helvetica')
+         .text(`Rapport trimestriel de présences — ${TRIMESTRES[tr].label} ${yr}`, L+8, 53, { width: W-16, align: 'center' });
+      doc.fontSize(9)
+         .text(`Agent : ${agent.prenom} ${agent.nom_famille}  |  Matricule : ${agent.matricule}  |  ${agent.direction_libelle || ''}`, L+8, 67, { width: W-16, align: 'center' });
+      doc.fillColor('black');
+    };
+
+    drawPageHeader();
+
+    // Stats globales
+    const ouvres   = [];
+    const cur = new Date(dateDebut);
+    let nbP=0, nbR=0, nbA=0, nbC=0, nbS=0;
+    while (cur <= dateFin) {
+      const ds = localDateStr(cur);
+      const dow = cur.getDay();
+      if (dow !== 0 && dow !== 6) {
+        const p = presMap[ds];
+        ouvres.push({ ds, p });
+        if (!p) nbS++;
+        else if (p.statut==='PRESENT') nbP++;
+        else if (p.statut==='RETARD')  nbR++;
+        else if (p.statut==='ABSENT')  nbA++;
+        else if (p.statut==='CONGE')   nbC++;
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    const taux = ouvres.length ? ((nbP+nbR)/ouvres.length*100).toFixed(1) : 0;
+
+    let y = 100;
+    // KPI row
+    const kpis = [
+      { label: 'Jours ouvrés', val: ouvres.length, color: '#1565C0' },
+      { label: 'Présents',     val: nbP,            color: '#2E7D32' },
+      { label: 'Retards',      val: nbR,            color: '#E65100' },
+      { label: 'Absents',      val: nbA,            color: '#616161' },
+      { label: 'Congés',       val: nbC,            color: '#0277BD' },
+      { label: 'Taux prés.',   val: `${taux}%`,     color: '#6A1B9A' },
+    ];
+    const kw = (W - 10) / kpis.length;
+    kpis.forEach((k, i) => {
+      const kx = L + i * kw;
+      doc.rect(kx, y, kw - 4, 40).fill(k.color).fillColor('white');
+      doc.fontSize(16).font('Helvetica-Bold').text(String(k.val), kx, y + 5, { width: kw-4, align: 'center' });
+      doc.fontSize(7).font('Helvetica').text(k.label, kx, y + 24, { width: kw-4, align: 'center' });
+    });
+    doc.fillColor('black');
+    y += 52;
+
+    // Colonnes tableau
+    const cols = [
+      { h: 'Date',   x: L,      w: 90  },
+      { h: 'Jour',   x: L+90,   w: 70  },
+      { h: 'Entrée', x: L+160,  w: 55  },
+      { h: 'Sortie', x: L+215,  w: 55  },
+      { h: 'Durée',  x: L+270,  w: 45  },
+      { h: 'Statut', x: L+315,  w: 75  },
+    ];
+    const rowH = 14;
+
+    const { moisDebut: md, moisFin: mf } = TRIMESTRES[tr];
+    for (let m = md; m <= mf; m++) {
+      // Titre du mois
+      doc.rect(L, y, W, 14).fill('#E3F2FD').fillColor('#1565C0');
+      doc.fontSize(9).font('Helvetica-Bold').text(`${MOIS_FR[m]} ${yr}`, L+4, y+3, { width: W-8 });
+      doc.fillColor('black');
+      y += 14;
+
+      // En-têtes
+      doc.rect(L, y, W, 13).fill('#1976D2').fillColor('white');
+      doc.fontSize(8).font('Helvetica-Bold');
+      cols.forEach(c => doc.text(c.h, c.x+2, y+3, { width: c.w-4, align: 'center' }));
+      doc.fillColor('black');
+      y += 13;
+
+      const firstDay = new Date(yr, m-1, 1);
+      const lastDay  = new Date(yr, m, 0);
+      const d = new Date(firstDay);
+      let iRow = 0;
+      while (d <= lastDay) {
+        if (y + rowH > doc.page.height - 50) {
+          doc.addPage({ size: 'A4', margin: 35 });
+          drawPageHeader();
+          y = 100;
+          // Re-draw col headers
+          doc.rect(L, y, W, 13).fill('#1976D2').fillColor('white');
+          doc.fontSize(8).font('Helvetica-Bold');
+          cols.forEach(c => doc.text(c.h, c.x+2, y+3, { width: c.w-4, align: 'center' }));
+          doc.fillColor('black');
+          y += 13;
+        }
+
+        const ds  = localDateStr(d);
+        const dow = d.getDay();
+        const isWE = dow === 0 || dow === 6;
+        const p = presMap[ds];
+        const dateLabel = d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
+
+        let bg = iRow % 2 === 0 ? '#FAFAFA' : '#FFFFFF';
+        if (isWE)              bg = '#EEEEEE';
+        else if (p?.statut === 'RETARD')  bg = '#FFF9C4';
+        else if (p?.statut === 'PRESENT') bg = '#F1F8E9';
+        else if (p?.statut === 'ABSENT')  bg = '#FFEBEE';
+        else if (p?.statut === 'CONGE')   bg = '#E3F2FD';
+
+        doc.rect(L, y, W, rowH).fill(bg);
+
+        const entree = p?.heure_entree ? p.heure_entree.substring(0,5) : (isWE ? '' : '—');
+        const sortie = p?.heure_sortie ? p.heure_sortie.substring(0,5) : (isWE ? '' : '—');
+        const duree  = calcDuree(p?.heure_entree, p?.heure_sortie);
+        const statut = isWE ? 'Week-end' : (p?.statut || 'Non pointé');
+
+        doc.fillColor(p?.statut === 'RETARD' ? '#BF360C' : isWE ? '#757575' : '#212121').fontSize(8).font('Helvetica');
+        doc.text(dateLabel,   cols[0].x+2, y+3, { width: cols[0].w-4 });
+        doc.text(JOURS_FR[dow], cols[1].x+2, y+3, { width: cols[1].w-4 });
+        doc.text(entree,      cols[2].x+2, y+3, { width: cols[2].w-4, align: 'center' });
+        doc.text(sortie,      cols[3].x+2, y+3, { width: cols[3].w-4, align: 'center' });
+        doc.text(duree,       cols[4].x+2, y+3, { width: cols[4].w-4, align: 'center' });
+        doc.text(statut,      cols[5].x+2, y+3, { width: cols[5].w-4, align: 'center' });
+        doc.fillColor('black');
+
+        y += rowH;
+        iRow++;
+        d.setDate(d.getDate() + 1);
+      }
+      y += 6;
+    }
+
+    // Pied de page
+    doc.fontSize(7).font('Helvetica').fillColor('#888888')
+       .text(`Généré le ${new Date().toLocaleString('fr-FR')} — SIRH Ministère Communication et Médias`, L, doc.page.height-25, { width: W });
+
+    doc.end();
+  } catch (err) { next(err); }
+});
+
 // ── Requête commune pour les exports ─────────────────────────────────────────
 async function queryPresences(date, direction_id) {
   const params = [];
