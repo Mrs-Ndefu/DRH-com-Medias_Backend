@@ -59,7 +59,8 @@ router.use(auth, requireAccess);
 // GET /api/archives/agents
 router.get('/agents', async (req, res, next) => {
   try {
-    const { search, situation } = req.query;
+    const { search, situation, page = 1, limit = 15 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = ['FALSE'];
     const conditions = ['a.actif = $1'];
 
@@ -72,6 +73,13 @@ router.get('/agents', async (req, res, next) => {
       conditions.push(`a.situation_admin = $${params.length}`);
     }
 
+    const where = conditions.join(' AND ');
+    const { rows: cnt } = await pool.query(
+      `SELECT COUNT(*) FROM agents a WHERE ${where}`,
+      params
+    );
+
+    params.push(parseInt(limit), offset);
     const { rows } = await pool.query(`
       SELECT a.id, a.matricule, a.nom_famille, a.prenom, a.grade,
              a.categorie, a.situation_admin, a.date_recrutement,
@@ -79,11 +87,12 @@ router.get('/agents', async (req, res, next) => {
              d.libelle AS direction_libelle
       FROM agents a
       LEFT JOIN directions d ON d.id = a.direction_id
-      WHERE ${conditions.join(' AND ')}
+      WHERE ${where}
       ORDER BY a.updated_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
     `, params);
 
-    res.json({ data: rows, total: rows.length });
+    res.json({ data: rows, total: parseInt(cnt[0].count), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) { next(err); }
 });
 

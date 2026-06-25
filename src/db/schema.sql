@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS agents (
   region_naissance      VARCHAR(100),
   pays_naissance        VARCHAR(100) DEFAULT 'Mali',
   nationalite           VARCHAR(100) DEFAULT 'Malienne',
+  autre_nationalite     VARCHAR(100),
   situation_familiale   VARCHAR(50),
   nb_enfants            INTEGER      NOT NULL DEFAULT 0,
   groupe_sanguin        VARCHAR(10),
@@ -83,9 +84,11 @@ CREATE TABLE IF NOT EXISTS agents (
   type_piece            VARCHAR(50),
   numero_piece          VARCHAR(100),
   date_expiration_piece DATE,
+  num_passeport         VARCHAR(50),
   -- Adresse
   adresse_rue           VARCHAR(200),
   adresse_ville         VARCHAR(100),
+  adresse_code_postal   VARCHAR(20),
   adresse_region        VARCHAR(100),
   adresse_pays          VARCHAR(100) DEFAULT 'Mali',
   -- Contact
@@ -120,6 +123,8 @@ CREATE TABLE IF NOT EXISTS agents (
   banque                VARCHAR(100),
   -- Affectation
   ministere_affectation VARCHAR(200),
+  direction             VARCHAR(200),
+  sous_direction        VARCHAR(200),
   direction_id          INTEGER      REFERENCES directions(id) ON DELETE SET NULL,
   division_id           INTEGER      REFERENCES divisions(id) ON DELETE SET NULL,
   service               VARCHAR(200),
@@ -135,6 +140,8 @@ CREATE TABLE IF NOT EXISTS agents (
   pays_formation        VARCHAR(100),
   annee_obtention       INTEGER,
   mention               VARCHAR(50),
+  -- Photo
+  photo_url             TEXT,
   -- Système
   actif                 BOOLEAN      NOT NULL DEFAULT TRUE,
   created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

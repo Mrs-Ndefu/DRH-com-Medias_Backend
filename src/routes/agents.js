@@ -1,6 +1,28 @@
+const path   = require('path');
+const fs     = require('fs');
 const router = require('express').Router();
+const multer = require('multer');
 const pool   = require('../db');
 const auth   = require('../middleware/auth');
+
+const PHOTOS_DIR = path.join(__dirname, '../../uploads/agents');
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
+const photoStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, PHOTOS_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `agent-${req.params.id}-${Date.now()}${ext}`);
+  },
+});
+const uploadPhoto = multer({
+  storage: photoStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Seules les images sont acceptées (JPEG, PNG, WEBP).'));
+  },
+});
 
 const AGENTS_ROLES = ['ADMIN', 'DRH', 'RH'];
 function requireAccess(req, res, next) {
@@ -38,7 +60,7 @@ router.get('/', async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT a.id, a.matricule, a.nom_famille, a.prenom, a.sexe,
              a.grade, a.categorie, a.indice, a.poste, a.situation_admin,
-             a.date_recrutement, a.telephone_mobile, a.email_pro,
+             a.date_recrutement, a.telephone_mobile, a.email_pro, a.photo_url,
              d.libelle AS direction_libelle
       FROM agents a
       LEFT JOIN directions d ON d.id = a.direction_id
@@ -88,14 +110,16 @@ router.post('/', async (req, res, next) => {
         mode_recrutement, numero_decision, date_decision, reference_jo, ministere_origine,
         type_contrat, situation_admin, numero_cnss, numero_retraite, rib, banque,
         ministere_affectation, direction_id, service, bureau, poste, lieu_affectation, region_affectation,
-        niveau_etudes, diplome, specialite, etablissement, pays_formation, annee_obtention, mention
+        niveau_etudes, diplome, specialite, etablissement, pays_formation, annee_obtention, mention,
+        autre_nationalite, num_passeport, adresse_code_postal, direction, sous_direction
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
         $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
         $31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
         $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,
-        $51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61
+        $51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,
+        $63,$64,$65,$66,$67
       ) RETURNING *
     `, [
       b.matricule, b.nomFamille || b.nom_famille, b.prenom, b.prenomSecondaire || null, b.nomJeuneFile || null,
@@ -111,6 +135,7 @@ router.post('/', async (req, res, next) => {
       b.typeContrat || null, b.situationAdmin || 'En activité', b.numeroCnss || null, b.numeroRetraite || null, b.rib || null, b.banque || null,
       b.ministereAffectation || null, b.direction_id || null, b.service || null, b.bureau || null, b.poste || null, b.lieuAffectation || null, b.regionAffectation || null,
       b.niveauEtudes || null, b.diplome || null, b.specialite || null, b.etablissement || null, b.paysFormation || null, parseInt(b.anneeObtention) || null, b.mention || null,
+      b.autreNationalite || null, b.numPasseport || null, b.adresseCodePostal || null, b.direction || null, b.sousDirection || null,
     ]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -122,26 +147,66 @@ router.put('/:id', async (req, res, next) => {
     const b = req.body;
     const { rows } = await pool.query(`
       UPDATE agents SET
-        nom_famille=$1, prenom=$2, prenom_secondaire=$3, nom_jeune_fille=$4,
-        sexe=$5, date_naissance=$6, lieu_naissance=$7, situation_familiale=$8, nb_enfants=$9,
-        telephone_mobile=$10, email_pro=$11, email_personnel=$12,
-        corps=$13, grade=$14, categorie=$15, classe=$16, echelon=$17, indice=$18,
-        type_contrat=$19, situation_admin=$20, banque=$21, rib=$22,
-        direction_id=$23, poste=$24, service=$25, lieu_affectation=$26,
-        niveau_etudes=$27, diplome=$28, specialite=$29, etablissement=$30,
+        matricule=$1,
+        nom_famille=$2, prenom=$3, prenom_secondaire=$4, nom_jeune_fille=$5,
+        sexe=$6, date_naissance=$7, lieu_naissance=$8, region_naissance=$9, pays_naissance=$10,
+        nationalite=$11, situation_familiale=$12, nb_enfants=$13, groupe_sanguin=$14,
+        type_piece=$15, numero_piece=$16, date_expiration_piece=$17,
+        adresse_rue=$18, adresse_ville=$19, adresse_region=$20, adresse_pays=$21, adresse_code_postal=$22,
+        telephone_fixe=$23, telephone_mobile=$24, email_pro=$25, email_personnel=$26,
+        urgence_nom=$27, urgence_relation=$28, urgence_telephone=$29,
+        corps=$30, grade=$31, categorie=$32, classe=$33, echelon=$34, indice=$35,
+        date_recrutement=$36, date_prise_fonction=$37, date_titularisation=$38,
+        mode_recrutement=$39, numero_decision=$40, date_decision=$41, reference_jo=$42, ministere_origine=$43,
+        type_contrat=$44, situation_admin=$45,
+        numero_cnss=$46, numero_retraite=$47, rib=$48, banque=$49,
+        ministere_affectation=$50, direction_id=$51, direction=$52, sous_direction=$53,
+        service=$54, bureau=$55, poste=$56, lieu_affectation=$57, region_affectation=$58,
+        niveau_etudes=$59, diplome=$60, specialite=$61, etablissement=$62,
+        pays_formation=$63, annee_obtention=$64, mention=$65,
+        autre_nationalite=$66, num_passeport=$67,
         updated_at=NOW()
-      WHERE id=$31 AND actif=TRUE RETURNING *
+      WHERE id=$68 AND actif=TRUE RETURNING *
     `, [
+      b.matricule || null,
       b.nomFamille || b.nom_famille, b.prenom, b.prenomSecondaire || null, b.nomJeuneFile || null,
-      b.sexe, b.dateNaissance || null, b.lieuNaissance || null, b.situationFamiliale || null, parseInt(b.nbEnfants || 0),
-      b.telephoneMobile || null, b.emailPro || null, b.emailPersonnel || null,
-      b.corps || null, b.grade || null, b.categorie || null, b.classe || null, parseInt(b.echelon) || null, parseInt(b.indice) || null,
-      b.typeContrat || null, b.situationAdmin || null, b.banque || null, b.rib || null,
-      b.direction_id || null, b.poste || null, b.service || null, b.lieuAffectation || null,
+      b.sexe, b.dateNaissance || null, b.lieuNaissance || null, b.regionNaissance || null, b.paysNaissance || null,
+      b.nationalite || null, b.situationFamiliale || null, parseInt(b.nbEnfants || 0), b.groupeSanguin || null,
+      b.typePiece || null, b.numeroPiece || null, b.dateExpiration || null,
+      b.adresseRue || null, b.adresseVille || null, b.adresseRegion || null, b.adressePays || null, b.adresseCodePostal || null,
+      b.telephoneFixe || null, b.telephoneMobile || null, b.emailPro || null, b.emailPersonnel || null,
+      b.urgenceNom || null, b.urgenceRelation || null, b.urgenceTelephone || null,
+      b.corps || null, b.grade || null, b.categorie || null, b.classe || null,
+      parseInt(b.echelon) || null, parseInt(b.indice) || null,
+      b.dateRecrutement || null, b.datePriseFonction || null, b.dateTitularisation || null,
+      b.modeRecrutement || null, b.numeroDecision || null, b.dateDecision || null, b.referenceJO || null, b.ministereDOrigine || null,
+      b.typeContrat || null, b.situationAdmin || null,
+      b.numeroCnss || null, b.numeroRetraite || null, b.rib || null, b.banque || null,
+      b.ministereAffectation || null, b.direction_id || null, b.direction || null, b.sousDirection || null,
+      b.service || null, b.bureau || null, b.poste || null, b.lieuAffectation || null, b.regionAffectation || null,
       b.niveauEtudes || null, b.diplome || null, b.specialite || null, b.etablissement || null,
+      b.paysFormation || null, parseInt(b.anneeObtention) || null, b.mention || null,
+      b.autreNationalite || null, b.numPasseport || null,
       req.params.id,
     ]);
     if (!rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/agents/:id/photo
+router.patch('/:id/photo', uploadPhoto.single('photo'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu.' });
+    const filePath = `/uploads/agents/${req.file.filename}`;
+    const { rows } = await pool.query(
+      'UPDATE agents SET photo_url=$1, updated_at=NOW() WHERE id=$2 AND actif=TRUE RETURNING id, photo_url',
+      [filePath, req.params.id]
+    );
+    if (!rows.length) {
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ message: 'Agent introuvable.' });
+    }
     res.json(rows[0]);
   } catch (err) { next(err); }
 });
