@@ -91,6 +91,30 @@ router.delete('/divisions/:id', auth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Bureaux ──────────────────────────────────────────────────
+
+router.get('/bureaux', auth, async (req, res, next) => {
+  try {
+    const { division_id } = req.query;
+    const params = [];
+    let where = 'WHERE actif=TRUE';
+    if (division_id) { params.push(parseInt(division_id)); where += ` AND division_id=$${params.length}`; }
+    const { rows } = await pool.query(`SELECT * FROM bureaux ${where} ORDER BY libelle`, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+router.post('/bureaux', auth, async (req, res, next) => {
+  try {
+    const { code, libelle, division_id, direction_id, description } = req.body;
+    const { rows } = await pool.query(
+      'INSERT INTO bureaux (code,libelle,division_id,direction_id,description) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [code, libelle, division_id || null, direction_id || null, description || null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+});
+
 // ── Grades ───────────────────────────────────────────────────
 
 router.get('/grades', auth, async (req, res, next) => {

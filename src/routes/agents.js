@@ -59,7 +59,7 @@ router.get('/', async (req, res, next) => {
 
     const { rows } = await pool.query(`
       SELECT a.id, a.matricule, a.nom_famille, a.prenom, a.sexe,
-             a.grade, a.categorie, a.indice, a.poste, a.situation_admin,
+             a.grade, a.categorie, a.corps, a.indice, a.poste, a.situation_admin,
              a.date_recrutement, a.telephone_mobile, a.email_pro, a.photo_url,
              d.libelle AS direction_libelle
       FROM agents a
