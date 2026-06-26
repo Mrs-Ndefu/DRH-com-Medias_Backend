@@ -36,10 +36,24 @@ router.use(auth, requireAccess);
 // GET /api/agents  — liste avec pagination et recherche
 router.get('/', async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, search = '', situation_admin, direction_id } = req.query;
+    const { page = 1, limit = 20, search = '', situation_admin, direction_id, actif } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
-    const conditions = ['a.actif = TRUE'];
+    const conditions = [];
+
+    // Situations considérées comme "hors service" même si actif=TRUE
+    const INACTIF_SQL = `a.situation_admin IN ('À la retraite','Suspendu','En disponibilité','En détachement')`;
+
+    if (actif === 'false') {
+      // Archivés = soft-deleted OU situation inactive
+      conditions.push(`(a.actif = FALSE OR ${INACTIF_SQL})`);
+    } else if (actif === 'all') {
+      // Tous, sans filtre
+    } else {
+      // Actifs = actif=TRUE ET pas une situation inactive
+      conditions.push('a.actif = TRUE');
+      conditions.push(`(a.situation_admin IS NULL OR NOT ${INACTIF_SQL})`);
+    }
 
     if (search) {
       params.push(`%${search}%`);
@@ -60,7 +74,7 @@ router.get('/', async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT a.id, a.matricule, a.nom_famille, a.prenom, a.sexe,
              a.grade, a.categorie, a.corps, a.indice, a.poste, a.situation_admin,
-             a.date_recrutement, a.telephone_mobile, a.email_pro, a.photo_url,
+             a.actif, a.date_recrutement, a.telephone_mobile, a.email_pro, a.photo_url,
              d.libelle AS direction_libelle
       FROM agents a
       LEFT JOIN directions d ON d.id = a.direction_id
@@ -85,7 +99,7 @@ router.get('/:id', async (req, res, next) => {
       SELECT a.*, d.libelle AS direction_libelle, d.code AS direction_code
       FROM agents a
       LEFT JOIN directions d ON d.id = a.direction_id
-      WHERE a.id = $1 AND a.actif = TRUE
+      WHERE a.id = $1
     `, [req.params.id]);
     if (!rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
     res.json(rows[0]);
@@ -211,7 +225,7 @@ router.patch('/:id/photo', uploadPhoto.single('photo'), async (req, res, next) =
   } catch (err) { next(err); }
 });
 
-// DELETE /api/agents/:id  (soft delete)
+// DELETE /api/agents/:id  (soft delete — archive)
 router.delete('/:id', async (req, res, next) => {
   try {
     const { rowCount } = await pool.query(
@@ -219,7 +233,19 @@ router.delete('/:id', async (req, res, next) => {
       [req.params.id]
     );
     if (!rowCount) return res.status(404).json({ message: 'Agent introuvable.' });
-    res.json({ message: 'Agent supprimé.' });
+    res.json({ message: 'Agent archivé.' });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/agents/:id/restaurer  (réactiver un agent archivé)
+router.patch('/:id/restaurer', async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      "UPDATE agents SET actif=TRUE, situation_admin='En activité', updated_at=NOW() WHERE id=$1 AND actif=FALSE",
+      [req.params.id]
+    );
+    if (!rowCount) return res.status(404).json({ message: 'Agent introuvable ou déjà actif.' });
+    res.json({ message: 'Agent restauré.' });
   } catch (err) { next(err); }
 });
 

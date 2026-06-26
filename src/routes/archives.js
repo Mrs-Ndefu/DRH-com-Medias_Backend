@@ -61,8 +61,8 @@ router.get('/agents', async (req, res, next) => {
   try {
     const { search, situation, page = 1, limit = 15 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const params = ['FALSE'];
-    const conditions = ['a.actif = $1'];
+    const params = [];
+    const conditions = ["(a.actif = FALSE OR a.situation_admin IN ('À la retraite','Suspendu','En disponibilité','En détachement'))"];
 
     if (search) {
       params.push(`%${search}%`);
@@ -111,7 +111,7 @@ router.get('/stats', async (req, res, next) => {
         COUNT(*) FILTER (WHERE categorie = 'A') AS cat_a,
         COUNT(*) FILTER (WHERE categorie = 'B') AS cat_b,
         COUNT(*) FILTER (WHERE categorie = 'C') AS cat_c
-      FROM agents WHERE actif = FALSE
+      FROM agents WHERE actif = FALSE OR situation_admin IN ('À la retraite','Suspendu','En disponibilité','En détachement')
     `);
     res.json(rows[0]);
   } catch (err) { next(err); }
