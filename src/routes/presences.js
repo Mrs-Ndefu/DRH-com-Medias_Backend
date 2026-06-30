@@ -1,6 +1,10 @@
+const { spawn } = require('child_process');
+const path   = require('path');
 const router = require('express').Router();
 const pool   = require('../db');
 const auth   = require('../middleware/auth');
+
+const PS_DIR = path.join(__dirname, '../../');  // → backend/
 
 const PRES_ROLES = ['ADMIN', 'DRH', 'SUPER_USER', 'RH'];
 function requireAccess(req, res, next) {
@@ -40,7 +44,6 @@ router.get('/', async (req, res, next) => {
 });
 
 // ── Règles horaires ──────────────────────────────────────────────────
-const ENTREE_MIN    = '06:00'; // heure d'ouverture
 const ENTREE_LIMITE = '09:45'; // après → RETARD
 const SORTIE_MIN    = '15:45'; // avant → sortie anticipée
 
@@ -48,6 +51,102 @@ function heureToMin(h) {
   const [hh, mm] = h.split(':').map(Number);
   return hh * 60 + mm;
 }
+
+// POST /api/presences/identifier-empreinte
+// Reçoit un FMD (base64) capturé par le navigateur via fp-bridge,
+// identifie l'agent parmi la galerie, enregistre le pointage.
+router.post('/identifier-empreinte', async (req, res, next) => {
+  try {
+    const { fmd: probeFmd } = req.body;
+    if (!probeFmd) return res.status(400).json({ message: 'fmd requis.' });
+
+    // Galerie : un FMD par agent
+    const { rows: gallery } = await pool.query(
+      `SELECT id, COALESCE(fingerprint_fmd_gauche, fingerprint_fmd) AS fmd
+       FROM agents
+       WHERE COALESCE(fingerprint_fmd_gauche, fingerprint_fmd) IS NOT NULL AND actif=TRUE`
+    );
+    if (!gallery.length) {
+      return res.status(404).json({ message: "Aucun agent avec empreinte enregistrée." });
+    }
+
+    // Appeler fp-identify.ps1 via PowerShell — galerie passée par stdin
+    const agentId = await new Promise((resolve, reject) => {
+      const ps = spawn('powershell.exe', [
+        '-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', path.join(PS_DIR, 'fp-identify.ps1'),
+        '-Timeout', '30000',
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      const input = JSON.stringify({ probe: probeFmd, gallery });
+      ps.stdin.write(input);
+      ps.stdin.end();
+
+      let out = '';
+      ps.stdout.on('data', d => { out += d.toString(); });
+      ps.stderr.on('data', d => { console.error('[fp-identify stderr]', d.toString()); });
+      ps.on('close', () => {
+        try {
+          const result = JSON.parse(out.trim().split('\n').pop());
+          if (result.success) resolve(result.agent_id);
+          else reject(new Error(result.error || 'Identification échouée'));
+        } catch (e) {
+          reject(new Error('Réponse PowerShell invalide: ' + out));
+        }
+      });
+    });
+
+    // Pointer l'agent identifié
+    const now = new Date();
+    const datePresence = now.toISOString().split('T')[0];
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const heureActuelle = `${hh}:${mm}:${ss}`;
+    const heureHHMM     = `${hh}:${mm}`;
+
+    const agentRes = await pool.query(
+      'SELECT nom_famille, prenom, matricule, poste FROM agents WHERE id=$1',
+      [agentId]
+    );
+    if (!agentRes.rows.length) return res.status(404).json({ message: 'Agent identifié introuvable.' });
+    const agent = agentRes.rows[0];
+
+    // Déterminer IN ou OUT
+    const existing = await pool.query(
+      'SELECT heure_entree, heure_sortie FROM presences WHERE agent_id=$1 AND date_presence=$2',
+      [agentId, datePresence]
+    );
+    const type = (!existing.rows.length || !existing.rows[0].heure_entree) ? 'IN' : 'OUT';
+
+    if (type === 'IN') {
+      const enRetard = heureToMin(heureHHMM) > heureToMin(ENTREE_LIMITE);
+      const statut = enRetard ? 'RETARD' : 'PRESENT';
+      const obs    = enRetard ? `Arrivée tardive à ${heureHHMM} (limite ${ENTREE_LIMITE})` : null;
+      const { rows } = await pool.query(`
+        INSERT INTO presences (agent_id, date_presence, heure_entree, mode_pointage, statut, observation)
+        VALUES ($1,$2,$3,'BIOMETRIQUE',$4,$5)
+        ON CONFLICT (agent_id, date_presence)
+        DO UPDATE SET heure_entree=$3, statut=$4, observation=$5, mode_pointage='BIOMETRIQUE'
+        RETURNING *
+      `, [agentId, datePresence, heureActuelle, statut, obs]);
+      return res.json({ ...rows[0], ...agent, type, retard: enRetard, sortie_anticipee: false, agent_id: agentId });
+    }
+
+    // OUT
+    const avantLimite = heureToMin(heureHHMM) < heureToMin(SORTIE_MIN);
+    const obs = avantLimite ? `Sortie anticipée à ${heureHHMM} (minimum ${SORTIE_MIN})` : null;
+    const { rows } = await pool.query(`
+      UPDATE presences SET heure_sortie=$1, observation=COALESCE($2, observation), mode_pointage='BIOMETRIQUE'
+      WHERE agent_id=$3 AND date_presence=$4
+      RETURNING *
+    `, [heureActuelle, obs, agentId, datePresence]);
+    if (!rows.length) {
+      return res.status(404).json({ message: "Aucune entrée enregistrée aujourd'hui pour cet agent." });
+    }
+    return res.json({ ...rows[0], ...agent, type, retard: false, sortie_anticipee: avantLimite, agent_id: agentId });
+  } catch (err) { next(err); }
+});
 
 // POST /api/presences/pointer  (scan biométrique ou manuel)
 router.post('/pointer', async (req, res, next) => {
@@ -72,10 +171,6 @@ router.post('/pointer', async (req, res, next) => {
 
     if (type === 'IN') {
       const enRetard = heureToMin(heureHHMM) > heureToMin(ENTREE_LIMITE);
-      const trop_tot = heureToMin(heureHHMM) < heureToMin(ENTREE_MIN);
-      if (trop_tot) {
-        return res.status(400).json({ message: `Pointage refusé : heure d'ouverture à ${ENTREE_MIN}.` });
-      }
       const statut = enRetard ? 'RETARD' : 'PRESENT';
       const obs    = enRetard ? `Arrivée tardive à ${heureHHMM} (limite ${ENTREE_LIMITE})` : null;
 

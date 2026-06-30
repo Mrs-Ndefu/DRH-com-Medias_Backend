@@ -249,6 +249,38 @@ router.patch('/:id/restaurer', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /api/agents/:id/fingerprint  — enregistrer pouce gauche et/ou droit
+router.put('/:id/fingerprint', async (req, res, next) => {
+  try {
+    const { fmd, fmd_gauche, fmd_droit } = req.body;
+    const sets = [];
+    const vals = [];
+    if (fmd_gauche !== undefined) { vals.push(fmd_gauche); sets.push(`fingerprint_fmd_gauche=$${vals.length}`); }
+    if (fmd_droit  !== undefined) { vals.push(fmd_droit);  sets.push(`fingerprint_fmd_droit=$${vals.length}`); }
+    if (fmd !== undefined && !fmd_gauche) { vals.push(fmd); sets.push(`fingerprint_fmd_gauche=$${vals.length}`); }
+    if (!sets.length) return res.status(400).json({ message: 'fmd_gauche ou fmd_droit requis.' });
+    vals.push(req.params.id);
+    const { rows } = await pool.query(
+      `UPDATE agents SET ${sets.join(', ')}, updated_at=NOW() WHERE id=$${vals.length} AND actif=TRUE RETURNING id`,
+      vals
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
+    res.json({ message: 'Empreinte(s) enregistrée(s).', agent_id: rows[0].id });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/agents/:id/fingerprint  — supprimer les empreintes
+router.delete('/:id/fingerprint', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE agents SET fingerprint_fmd=NULL, fingerprint_fmd_gauche=NULL, fingerprint_fmd_droit=NULL, updated_at=NOW() WHERE id=$1 AND actif=TRUE RETURNING id',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Agent introuvable.' });
+    res.json({ message: 'Empreintes supprimées.' });
+  } catch (err) { next(err); }
+});
+
 // GET /api/agents/:id/evenements
 router.get('/:id/evenements', async (req, res, next) => {
   try {
